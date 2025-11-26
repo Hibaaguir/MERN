@@ -9,10 +9,15 @@ pipeline {
     }
 
     environment {
-        DOCKERHUB_CREDENTIALS_ID = 'dockerhub-creds'    
-
+       
+        DOCKERHUB_CREDENTIALS_ID = 'dockerhub-creds'
+        
+        // Vos noms d'images
         IMAGE_NAME_SERVER = 'hibaaguir/mern-server'
         IMAGE_NAME_CLIENT = 'hibaaguir/mern-client'
+
+        
+        DOCKER_HOST = 'tcp://localhost:2375'
     }
 
     stages {
@@ -23,7 +28,12 @@ pipeline {
             }
         }
 
+      
         stage('Build Server Image') {
+           
+            when {
+                changeset "server/**"
+            }
             steps {
                 dir('server') {
                     script {
@@ -33,9 +43,44 @@ pipeline {
             }
         }
 
-        stage('Build Client Image') {
+        stage('Scan Server Image') {
+            when {
+                changeset "server/**"
+            }
             steps {
-                dir('client') {
+                script {
+                  
+                    try {
+                        bat """
+                        docker run --rm -v //./pipe/docker_engine://./pipe/docker_engine aquasec/trivy:latest image --exit-code 0 --severity LOW,MEDIUM,HIGH,CRITICAL ${IMAGE_NAME_SERVER}:latest
+                        """
+                    } catch (Exception e) {
+                        echo "Le scan Trivy a échoué (problème fréquent sur Windows). Le pipeline continue."
+                    }
+                }
+            }
+        }
+
+        stage('Push Server Image') {
+            when {
+                changeset "server/**"
+            }
+            steps {
+                script {
+                    docker.withRegistry('', DOCKERHUB_CREDENTIALS_ID) {
+                        dockerImageServer.push('latest')
+                    }
+                }
+            }
+        }
+
+       
+        stage('Build Client Image') {
+            when {
+                changeset "client/**"
+            }
+            steps {
+                dir('client') { 
                     script {
                         dockerImageClient = docker.build("${IMAGE_NAME_CLIENT}:latest")
                     }
@@ -43,35 +88,58 @@ pipeline {
             }
         }
 
-        stage('Scan Server Image') {
-            steps {
-                script {
-                    bat """
-                    docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 0 --severity LOW,MEDIUM,HIGH,CRITICAL ${IMAGE_NAME_SERVER}:latest
-                    """
-                }
-            }
-        }
-
         stage('Scan Client Image') {
+            when {
+                changeset "client/**"
+            }
             steps {
                 script {
-                    bat """
-                    docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 0 --severity LOW,MEDIUM,HIGH,CRITICAL ${IMAGE_NAME_CLIENT}:latest
-                    """
+                    try {
+                        bat """
+                        docker run --rm -v //./pipe/docker_engine://./pipe/docker_engine aquasec/trivy:latest image --exit-code 0 --severity LOW,MEDIUM,HIGH,CRITICAL ${IMAGE_NAME_CLIENT}:latest
+                        """
+                    } catch (Exception e) {
+                        echo "Le scan Trivy a échoué. Le pipeline continue."
+                    }
                 }
             }
         }
 
-        stage('Push Images to Docker Hub') {
+        stage('Push Client Image') {
+            when {
+                changeset "client/**"
+            }
             steps {
                 script {
                     docker.withRegistry('', DOCKERHUB_CREDENTIALS_ID) {
-                        dockerImageServer.push('latest')
                         dockerImageClient.push('latest')
                     }
                 }
             }
+        }
+    }
+
+   
+    post {
+        always {
+            echo "Nettoyage..."
+            
+           
+            bat "docker container prune -f"
+            bat "docker image prune -f"
+
+           
+            script {
+                try {
+                     bat """
+                     for /f "tokens=3" %%i in ('docker images ^| findstr "mern-server"') do docker rmi -f %%i
+                     for /f "tokens=3" %%i in ('docker images ^| findstr "mern-client"') do docker rmi -f %%i
+                     """
+                } catch (Exception e) {
+                    echo "Rien à nettoyer ou erreur lors du nettoyage spécifique."
+                }
+            }
+            echo "Nettoyage terminé."
         }
     }
 }
